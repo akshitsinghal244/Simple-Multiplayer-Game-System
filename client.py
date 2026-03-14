@@ -18,7 +18,7 @@ import sys
 import math
 import pygame
 
-# ─── CONFIG ──────────────────────────────────────────────────────────────────
+# CONFIG 
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 9999
 PLAYER_SPEED = 200.0
@@ -27,7 +27,7 @@ WORLD_H = 600
 INPUT_RATE = 60         # inputs per second
 INTERP_DELAY = 0.1      # seconds of interpolation buffer for remote players
 
-# ─── PACKET TYPES ────────────────────────────────────────────────────────────
+# PACKET TYPES 
 PKT_CONNECT    = "CONNECT"
 PKT_DISCONNECT = "DISCONNECT"
 PKT_ACK        = "ACK"
@@ -37,7 +37,7 @@ PKT_INPUT      = "INPUT"
 PKT_PLAYER_JOIN = "PLAYER_JOIN"
 PKT_PLAYER_QUIT = "PLAYER_QUIT"
 
-# ─── COLORS ──────────────────────────────────────────────────────────────────
+# COLORS 
 BG_COLOR        = (15, 15, 25)
 GRID_COLOR      = (30, 30, 50)
 GROUND_COLOR    = (25, 25, 40)
@@ -50,7 +50,7 @@ def hex_to_rgb(h):
     h = h.lstrip("#")
     return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
 
-# ─── NETWORK CLIENT ──────────────────────────────────────────────────────────
+# NETWORK CLIENT 
 
 class NetworkClient:
     def __init__(self, host, port, name):
@@ -92,7 +92,7 @@ class NetworkClient:
         threading.Thread(target=self._recv_loop, daemon=True).start()
         threading.Thread(target=self._ack_retry_loop, daemon=True).start()
 
-    # ── SEND HELPERS ─────────────────────────────────────────────────────────
+    # SEND HELPERS 
 
     def _encode(self, data):
         return json.dumps(data).encode()
@@ -119,7 +119,7 @@ class NetworkClient:
     def _ack(self, seq):
         self._send({"type": PKT_ACK, "seq": seq})
 
-    # ── CONNECT ──────────────────────────────────────────────────────────────
+    # CONNECT 
 
     def connect(self):
         self._send({"type": PKT_CONNECT, "name": self.name})
@@ -127,8 +127,7 @@ class NetworkClient:
     def disconnect(self):
         self._send({"type": PKT_DISCONNECT})
 
-    # ── INPUT SENDING ────────────────────────────────────────────────────────
-
+    # INPUT SENDING 
     def send_input(self, dx, dy, dt):
         if not self.connected:
             return
@@ -157,8 +156,7 @@ class NetworkClient:
 
         self._send(packet)  # Input is unreliable (high frequency)
 
-    # ── PREDICTION ───────────────────────────────────────────────────────────
-
+    # PREDICTION 
     def predict_move(self, dx, dy, dt):
         """Apply movement locally immediately (client-side prediction)."""
         if dx != 0 or dy != 0:
@@ -194,8 +192,7 @@ class NetworkClient:
         self.local_x = rx
         self.local_y = ry
 
-    # ── INTERPOLATION ────────────────────────────────────────────────────────
-
+    # INTERPOLATION 
     def get_interpolated_pos(self, pid, now):
         """Return interpolated position for a remote player."""
         buf = self.interp_buffer.get(pid, [])
@@ -230,8 +227,7 @@ class NetworkClient:
         iy = before["y"] + (after["y"] - before["y"]) * alpha
         return ix, iy
 
-    # ── RECEIVE LOOP ─────────────────────────────────────────────────────────
-
+    # RECEIVE LOOP 
     def _recv_loop(self):
         while True:
             try:
@@ -331,18 +327,25 @@ class NetworkClient:
             time.sleep(0.01)
 
 
-# ─── RENDERER ────────────────────────────────────────────────────────────────
+# RENDERER
 
 class GameRenderer:
     def __init__(self, client: NetworkClient):
         self.client = client
         pygame.init()
+        pygame.font.init()  # explicitly init font module before any font calls
         self.screen = pygame.display.set_mode((WORLD_W, WORLD_H))
         pygame.display.set_caption("UDP Multiplayer — Connecting...")
         self.clock = pygame.time.Clock()
-        self.font_lg = pygame.font.SysFont("Consolas", 18, bold=True)
-        self.font_sm = pygame.font.SysFont("Consolas", 13)
-        self.font_hud = pygame.font.SysFont("Consolas", 14)
+        # Fall back to default font if SysFont fails (common on some Linux setups)
+        try:
+            self.font_lg  = pygame.font.SysFont("Consolas", 18, bold=True)
+            self.font_sm  = pygame.font.SysFont("Consolas", 13)
+            self.font_hud = pygame.font.SysFont("Consolas", 14)
+        except Exception:
+            self.font_lg  = pygame.font.Font(None, 22)
+            self.font_sm  = pygame.font.Font(None, 16)
+            self.font_hud = pygame.font.Font(None, 18)
 
         # Trails for local player
         self.trail = []  # list of (x, y)
@@ -466,7 +469,7 @@ class GameRenderer:
             dt = self.clock.tick(60) / 1000.0
             now = time.time()
 
-            # ── EVENTS ───────────────────────────────────────────────────────
+            # EVENTS 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     c.disconnect()
@@ -477,7 +480,7 @@ class GameRenderer:
                     pygame.quit()
                     return
 
-            # ── INPUT ────────────────────────────────────────────────────────
+            # INPUT 
             keys = pygame.key.get_pressed()
             dx, dy = 0.0, 0.0
             if keys[pygame.K_w] or keys[pygame.K_UP]:    dy -= 1
@@ -514,14 +517,14 @@ class GameRenderer:
                     if self.trail:
                         self.trail.pop(0)
 
-            # ── UPDATE PARTICLES ─────────────────────────────────────────────
+            # UPDATE PARTICLES 
             for p in self.particles:
                 p["x"] += p["vx"] * dt
                 p["y"] += p["vy"] * dt
                 p["life"] -= dt
             self.particles = [p for p in self.particles if p["life"] > 0]
 
-            # ── DRAW ─────────────────────────────────────────────────────────
+            # DRAW 
             self.screen.blit(self.bg, (0, 0))
             self._draw_trail()
             self._draw_particles()
@@ -555,7 +558,7 @@ class GameRenderer:
             pygame.display.flip()
 
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
+# MAIN
 
 if __name__ == "__main__":
     args = sys.argv[1:]

@@ -15,19 +15,20 @@ import random
 import math
 from collections import defaultdict
 
-# ─── CONFIG ──────────────────────────────────────────────────────────────────
+# CONFIG 
 HOST = "0.0.0.0"
 PORT = 9999
 TICK_RATE = 20          # server ticks per second
 TICK_INTERVAL = 1.0 / TICK_RATE
-MAX_PLAYERS = 2
+MAX_PLAYERS = 5
 PLAYER_SPEED = 200.0    # units/sec
+PLAYER_RADIUS = 16      # must match client circle size
 WORLD_W = 800
 WORLD_H = 600
 ACK_RETRY_INTERVAL = 0.1
 ACK_MAX_RETRIES = 10
 
-# ─── PACKET TYPES ────────────────────────────────────────────────────────────
+# PACKET TYPES 
 PKT_CONNECT     = "CONNECT"
 PKT_DISCONNECT  = "DISCONNECT"
 PKT_ACK         = "ACK"
@@ -38,13 +39,16 @@ PKT_PLAYER_JOIN = "PLAYER_JOIN"
 PKT_PLAYER_QUIT = "PLAYER_QUIT"
 
 SPAWN_POSITIONS = [
-    (200, 300),
-    (600, 300),
+    (200, 200),
+    (600, 200),
+    (400, 300),
+    (200, 450),
+    (600, 450),
 ]
 
-PLAYER_COLORS = ["#00FFAA", "#FF6B6B"]
+PLAYER_COLORS = ["#00FFAA", "#FF6B6B", "#FFD93D", "#6BCBFF", "#FF9FE5"]
 
-# ─── SERVER STATE ─────────────────────────────────────────────────────────────
+# SERVER STATE 
 players = {}        # pid -> player dict
 addr_to_pid = {}    # addr -> pid
 next_pid = 0
@@ -56,8 +60,7 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.settimeout(0.01)
 
-# ─── HELPERS ─────────────────────────────────────────────────────────────────
-
+# HELPERS 
 def encode(data: dict) -> bytes:
     return json.dumps(data).encode()
 
@@ -102,8 +105,7 @@ def broadcast_reliable(data_fn, exclude=None):
             data = data_fn(addr)
             send_reliable(addr, data)
 
-# ─── ACK RETRY LOOP ──────────────────────────────────────────────────────────
-
+# ACK RETRY LOOP 
 def ack_retry_loop():
     while True:
         now = time.time()
@@ -127,8 +129,7 @@ def ack_retry_loop():
                 disconnect_player(pid, addr)
         time.sleep(0.01)
 
-# ─── GAME TICK ────────────────────────────────────────────────────────────────
-
+# GAME TICK 
 def tick_loop():
     last = time.time()
     while True:
@@ -149,6 +150,26 @@ def tick_loop():
                 p["x"] = max(20, min(WORLD_W - 20, p["x"] + dx * PLAYER_SPEED * dt))
                 p["y"] = max(20, min(WORLD_H - 20, p["y"] + dy * PLAYER_SPEED * dt))
                 p["last_input_seq"] = inp.get("seq", 0)
+
+# COLLISION RESOLUTION 
+            pids = list(players.keys())
+            for i in range(len(pids)):
+                for j in range(i + 1, len(pids)):
+                    a = players[pids[i]]
+                    b = players[pids[j]]
+                    dx = b["x"] - a["x"]
+                    dy = b["y"] - a["y"]
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    min_dist = PLAYER_RADIUS * 2
+                    if 0 < dist < min_dist:
+                        # Push both apart equally along collision axis
+                        overlap = (min_dist - dist) / 2.0
+                        nx = dx / dist
+                        ny = dy / dist
+                        a["x"] = max(PLAYER_RADIUS, min(WORLD_W - PLAYER_RADIUS, a["x"] - nx * overlap))
+                        a["y"] = max(PLAYER_RADIUS, min(WORLD_H - PLAYER_RADIUS, a["y"] - ny * overlap))
+                        b["x"] = max(PLAYER_RADIUS, min(WORLD_W - PLAYER_RADIUS, b["x"] + nx * overlap))
+                        b["y"] = max(PLAYER_RADIUS, min(WORLD_H - PLAYER_RADIUS, b["y"] + ny * overlap))
 
             state = {
                 "type": PKT_GAME_STATE,
@@ -172,8 +193,7 @@ def tick_loop():
         if sleep_time > 0:
             time.sleep(sleep_time)
 
-# ─── PLAYER MANAGEMENT ────────────────────────────────────────────────────────
-
+# PLAYER MANAGEMENT 
 def disconnect_player(pid, addr):
     with lock:
         if pid not in players:
@@ -192,7 +212,7 @@ def disconnect_player(pid, addr):
         }
     broadcast_reliable(make_quit_packet)
 
-# ─── PACKET HANDLERS ──────────────────────────────────────────────────────────
+# PACKET HANDLERS
 
 def handle_connect(addr, data):
     global next_pid
@@ -276,7 +296,7 @@ def handle_disconnect(addr, data):
     if pid is not None:
         disconnect_player(pid, addr)
 
-# ─── RECEIVE LOOP ─────────────────────────────────────────────────────────────
+# RECEIVE LOOP
 
 HANDLERS = {
     PKT_CONNECT:    handle_connect,
@@ -299,7 +319,7 @@ def recv_loop():
         except Exception as e:
             pass
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
+# MAIN
 
 if __name__ == "__main__":
     sock.bind((HOST, PORT))
