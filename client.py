@@ -337,15 +337,10 @@ class GameRenderer:
         self.screen = pygame.display.set_mode((WORLD_W, WORLD_H))
         pygame.display.set_caption("UDP Multiplayer — Connecting...")
         self.clock = pygame.time.Clock()
-        # Fall back to default font if SysFont fails (common on some Linux setups)
-        try:
-            self.font_lg  = pygame.font.SysFont("Consolas", 18, bold=True)
-            self.font_sm  = pygame.font.SysFont("Consolas", 13)
-            self.font_hud = pygame.font.SysFont("Consolas", 14)
-        except Exception:
-            self.font_lg  = pygame.font.Font(None, 22)
-            self.font_sm  = pygame.font.Font(None, 16)
-            self.font_hud = pygame.font.Font(None, 18)
+        #We keep the code compatible for both Linux and Windows System.
+        self.font_lg  = pygame.font.Font(None, 22)
+        self.font_sm  = pygame.font.Font(None, 16)
+        self.font_hud = pygame.font.Font(None, 18)
 
         # Trails for local player
         self.trail = []  # list of (x, y)
