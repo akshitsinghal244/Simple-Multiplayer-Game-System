@@ -15,7 +15,7 @@ import random
 import math
 from collections import defaultdict
 
-# CONFIG 
+#CONFIG
 HOST = "0.0.0.0"
 PORT = 9999
 TICK_RATE = 20          # server ticks per second
@@ -28,7 +28,7 @@ WORLD_H = 600
 ACK_RETRY_INTERVAL = 0.1
 ACK_MAX_RETRIES = 10
 
-# PACKET TYPES 
+#PACKET TYPES
 PKT_CONNECT     = "CONNECT"
 PKT_DISCONNECT  = "DISCONNECT"
 PKT_ACK         = "ACK"
@@ -48,7 +48,7 @@ SPAWN_POSITIONS = [
 
 PLAYER_COLORS = ["#00FFAA", "#FF6B6B", "#FFD93D", "#6BCBFF", "#FF9FE5"]
 
-# SERVER STATE 
+#SERVER STATE
 players = {}        # pid -> player dict
 addr_to_pid = {}    # addr -> pid
 next_pid = 0
@@ -60,7 +60,8 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.settimeout(0.01)
 
-# HELPERS 
+#HELPERS
+
 def encode(data: dict) -> bytes:
     return json.dumps(data).encode()
 
@@ -105,7 +106,8 @@ def broadcast_reliable(data_fn, exclude=None):
             data = data_fn(addr)
             send_reliable(addr, data)
 
-# ACK RETRY LOOP 
+#ACK RETRY LOOP
+
 def ack_retry_loop():
     while True:
         now = time.time()
@@ -129,7 +131,8 @@ def ack_retry_loop():
                 disconnect_player(pid, addr)
         time.sleep(0.01)
 
-# GAME TICK 
+#GAME TICK
+
 def tick_loop():
     last = time.time()
     while True:
@@ -151,7 +154,7 @@ def tick_loop():
                 p["y"] = max(20, min(WORLD_H - 20, p["y"] + dy * PLAYER_SPEED * dt))
                 p["last_input_seq"] = inp.get("seq", 0)
 
-# COLLISION RESOLUTION 
+            # COLLISION RESOLUTION
             pids = list(players.keys())
             for i in range(len(pids)):
                 for j in range(i + 1, len(pids)):
@@ -193,7 +196,7 @@ def tick_loop():
         if sleep_time > 0:
             time.sleep(sleep_time)
 
-# PLAYER MANAGEMENT 
+# PLAYER MANAGEMENT
 def disconnect_player(pid, addr):
     with lock:
         if pid not in players:
@@ -212,8 +215,7 @@ def disconnect_player(pid, addr):
         }
     broadcast_reliable(make_quit_packet)
 
-# PACKET HANDLERS
-
+#PACKET HANDLERS
 def handle_connect(addr, data):
     global next_pid
     with lock:
@@ -296,7 +298,7 @@ def handle_disconnect(addr, data):
     if pid is not None:
         disconnect_player(pid, addr)
 
-# RECEIVE LOOP
+#RECEIVE LOOP
 
 HANDLERS = {
     PKT_CONNECT:    handle_connect,
@@ -311,6 +313,34 @@ def recv_loop():
             raw, addr = sock.recvfrom(4096)
             data = decode(raw)
             ptype = data.get("type")
+
+            #PACKET LOG
+            with lock:
+                pid = addr_to_pid.get(addr)
+            name = players[pid]["name"] if pid is not None and pid in players else "unknown"
+
+            if ptype == PKT_INPUT:
+                dx = data.get("dx", 0)
+                dy = data.get("dy", 0)
+                seq = data.get("seq", "?")
+                direction = ""
+                if dy < 0: direction += "↑"
+                if dy > 0: direction += "↓"
+                if dx < 0: direction += "←"
+                if dx > 0: direction += "→"
+                if not direction: direction = "·"
+                print(f"[PKT] INPUT     from {name:<12} seq={seq:<5} dir={direction}")
+            elif ptype == PKT_CONNECT:
+                join_name = data.get("name", "?")
+                print(f"[PKT] CONNECT   from {addr[0]}:{addr[1]}  name='{join_name}'")
+            elif ptype == PKT_DISCONNECT:
+                print(f"[PKT] DISCONNECT from {name}  addr={addr[0]}:{addr[1]}")
+            elif ptype == PKT_ACK:
+                seq = data.get("seq", "?")
+                print(f"[PKT] ACK       from {name:<12} seq={seq}")
+            else:
+                print(f"[PKT] {ptype:<12} from {addr[0]}:{addr[1]}")
+            #END LOG
             handler = HANDLERS.get(ptype)
             if handler:
                 handler(addr, data)
@@ -319,8 +349,7 @@ def recv_loop():
         except Exception as e:
             pass
 
-# MAIN
-
+#MAIN
 if __name__ == "__main__":
     sock.bind((HOST, PORT))
     print(f"[SERVER] Listening on {HOST}:{PORT}")
