@@ -159,10 +159,12 @@ class NetworkClient:
     # PREDICTION 
     def predict_move(self, dx, dy, dt):
         """Apply movement locally immediately (client-side prediction)."""
-        if dx != 0 or dy != 0:
-            length = math.sqrt(dx*dx + dy*dy)
+        length = math.sqrt(dx*dx + dy*dy) 
+        if length > 1e-6: #taking limits into consideration (values very close to zero)
             dx /= length
             dy /= length
+        else:
+            dx, dy = 0.0, 0.0
         self.local_x = max(20, min(self.world_w - 20, self.local_x + dx * PLAYER_SPEED * dt))
         self.local_y = max(20, min(self.world_h - 20, self.local_y + dy * PLAYER_SPEED * dt))
 
@@ -182,10 +184,12 @@ class NetworkClient:
         for inp in self.input_history:
             dx, dy = inp["dx"], inp["dy"]
             dt = inp["dt"]
-            if dx != 0 or dy != 0:
-                length = math.sqrt(dx*dx + dy*dy)
+            length = math.sqrt(dx*dx + dy*dy)
+            if length > 1e-6:
                 dx /= length
                 dy /= length
+            else:
+                dx, dy = 0.0, 0.0
             rx = max(20, min(self.world_w - 20, rx + dx * PLAYER_SPEED * dt))
             ry = max(20, min(self.world_h - 20, ry + dy * PLAYER_SPEED * dt))
 
@@ -298,7 +302,7 @@ class NetworkClient:
                 self.interp_buffer[pid] = []
             print(f"[CLIENT] {data['name']} joined")
 
-        elif ptype == PKT_PLAYER_QUIT:
+        elif ptype == PKT_PLAYER_QUIT: 
             self._ack(data["seq"])
             pid = data["pid"]
             with self.lock:
@@ -441,6 +445,7 @@ class GameRenderer:
             hud.blit(txt, (8, 6 + i * 18))
         self.screen.blit(hud, (8, 8))
 
+
     def _draw_legend(self):
         controls = [
             "WASD / Arrow keys: Move",
@@ -541,7 +546,7 @@ class GameRenderer:
                 p = players_snap[my_pid]
                 self._draw_player(lx, ly, p["color"], p["name"], is_local=True)
 
-            # HUD
+            # Collection
             fps = self.clock.get_fps()
             self._draw_hud(fps, my_pid)
             self._draw_legend()
