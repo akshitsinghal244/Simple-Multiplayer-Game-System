@@ -337,7 +337,7 @@ class GameRenderer:
         self.screen = pygame.display.set_mode((WORLD_W, WORLD_H))
         pygame.display.set_caption("UDP Multiplayer — Connecting...")
         self.clock = pygame.time.Clock()
-        #We keep the code compatible for both Linux and Windows System.
+        # Fall back to default font if SysFont fails (common on some Linux setups)
         self.font_lg  = pygame.font.Font(None, 22)
         self.font_sm  = pygame.font.Font(None, 16)
         self.font_hud = pygame.font.Font(None, 18)

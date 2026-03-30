@@ -1,6 +1,6 @@
 """
 UDP Multiplayer Game Server
-- Handles up to 2 players
+- Handles up to 5 players
 - Reliable ACK system for critical messages
 - Broadcasts authoritative game state
 - Runs at 20 ticks/sec
@@ -52,9 +52,13 @@ PLAYER_COLORS = ["#00FFAA", "#FF6B6B", "#FFD93D", "#6BCBFF", "#FF9FE5"]
 players = {}        # pid -> player dict
 addr_to_pid = {}    # addr -> pid
 next_pid = 0
+# Main game-state lock (players, addr mappings, etc.)
 lock = threading.Lock()
-seq_counter = defaultdict(int)    # addr -> outgoing seq
-pending_acks = {}                 # (addr, seq) -> {packet, retries, last_sent}
+# Separate lock for ACK-tracking data since pending_acks is accessed
+# from multiple threads (send, retry loop, ACK handler)
+ack_lock = threading.Lock()
+seq_counter = defaultdict(int) #addr -> outgoing sequence
+pending_acks = {}            # (addr, seq) -> {packet, retries, last_sent}
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -75,13 +79,15 @@ def send(addr, data: dict):
         print(f"[SEND ERR] {e}")
 
 def send_reliable(addr, data: dict):
-    """Send with ACK tracking. Caller must include 'seq' in data."""
+    # Track reliable packets under ack_lock so retries/ACK removals
+    # do not race with each other across threads
     seq = data["seq"]
-    pending_acks[(addr, seq)] = {
-        "packet": data,
-        "retries": 0,
-        "last_sent": time.time()
-    }
+    with ack_lock:
+        pending_acks[(addr, seq)] = {
+            "packet": data,
+            "retries": 0,
+            "last_sent": time.time()
+        }
     send(addr, data)
 
 def next_seq(addr):
@@ -90,21 +96,27 @@ def next_seq(addr):
 
 def broadcast(data: dict, exclude=None):
     with lock:
-        targets = list(players.keys())
-    for pid in targets:
-        addr = players[pid]["addr"]
-        if addr != exclude:
-            send(addr, data)
+        targets = [
+            p["addr"]
+            for p in players.values()
+            if p["addr"] != exclude
+        ]
+
+    for addr in targets:
+        send(addr, data)
 
 def broadcast_reliable(data_fn, exclude=None):
-    """data_fn(addr) -> dict — so each gets unique seq"""
+   # Snapshot addresses first so disconnects during iteration do not invalidate player lookups.
     with lock:
-        targets = list(players.keys())
-    for pid in targets:
-        addr = players[pid]["addr"]
-        if addr != exclude:
-            data = data_fn(addr)
-            send_reliable(addr, data)
+        targets = [
+            p["addr"]
+            for p in players.values()
+            if p["addr"] != exclude
+        ]
+
+    for addr in targets:
+        data = data_fn(addr)
+        send_reliable(addr, data)
 
 #ACK RETRY LOOP
 
@@ -112,23 +124,32 @@ def ack_retry_loop():
     while True:
         now = time.time()
         expired = []
-        for key, info in list(pending_acks.items()):
-            if now - info["last_sent"] > ACK_RETRY_INTERVAL:
-                if info["retries"] >= ACK_MAX_RETRIES:
-                    expired.append(key)
-                else:
-                    send(key[0], info["packet"])
-                    info["retries"] += 1
-                    info["last_sent"] = now
+
+        # Protect pending_acks while scanning and updating retry metadata.
+        # Expired packets are removed here, but player disconnects are done later outside ack_lock to avoid lock nesting problems.
+        with ack_lock:
+            for key, info in list(pending_acks.items()):
+                if now - info["last_sent"] > ACK_RETRY_INTERVAL:
+                    if info["retries"] >= ACK_MAX_RETRIES:
+                        expired.append(key)
+                    else:
+                        send(key[0], info["packet"])
+                        info["retries"] += 1
+                        info["last_sent"] = now
+            # Disconnect outside ack_lock/main lock region to avoid deadlock and to keep critical sections small.
+            for key in expired:
+                pending_acks.pop(key, None)
+
         for key in expired:
             addr = key[0]
             print(f"[ACK TIMEOUT] {addr} seq={key[1]}, dropping.")
-            pending_acks.pop(key, None)
-            # Optionally disconnect player
+
             with lock:
                 pid = addr_to_pid.get(addr)
+
             if pid is not None:
                 disconnect_player(pid, addr)
+
         time.sleep(0.01)
 
 #GAME TICK
@@ -150,8 +171,9 @@ def tick_loop():
                     length = math.sqrt(dx*dx + dy*dy)
                     dx /= length
                     dy /= length
-                p["x"] = max(20, min(WORLD_W - 20, p["x"] + dx * PLAYER_SPEED * dt))
-                p["y"] = max(20, min(WORLD_H - 20, p["y"] + dy * PLAYER_SPEED * dt))
+                    # Clamp position using PLAYER_RADIUS so wall bounds stay consistent with collision/player size logic.
+                p["x"] = max(PLAYER_RADIUS, min(WORLD_W - PLAYER_RADIUS, p["x"] + dx * PLAYER_SPEED * dt))
+                p["y"] = max(PLAYER_RADIUS, min(WORLD_H - PLAYER_RADIUS, p["y"] + dy * PLAYER_SPEED * dt))
                 p["last_input_seq"] = inp.get("seq", 0)
 
             # COLLISION RESOLUTION
@@ -287,9 +309,11 @@ def handle_input(addr, data):
 
 
 def handle_ack(addr, data):
+    # ACK removal must be synchronized with retry loop / reliable sends so pending_acks is not modified concurrently.
     seq = data.get("seq")
     key = (addr, seq)
-    pending_acks.pop(key, None)
+    with ack_lock:
+        pending_acks.pop(key, None)
 
 
 def handle_disconnect(addr, data):
@@ -347,7 +371,9 @@ def recv_loop():
         except socket.timeout:
             pass
         except Exception as e:
-            pass
+            # Never swallow unexpected receive/parse/runtime errors silently;
+            # print them so networking bugs can actually be diagnosed.
+            print(f"[RECV ERR] {e}")
 
 #MAIN
 if __name__ == "__main__":
