@@ -18,39 +18,43 @@ import sys
 import math
 import pygame
 
-# CONFIG 
+# CONFIG
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 9999
 PLAYER_SPEED = 200.0
+PLAYER_RADIUS = 16
 WORLD_W = 800
 WORLD_H = 600
-INPUT_RATE = 60         # inputs per second
-INTERP_DELAY = 0.1      # seconds of interpolation buffer for remote players
+INPUT_RATE = 60  # inputs per second
+INTERP_DELAY = 0.1  # seconds of interpolation buffer for remote players
 
-# PACKET TYPES 
-PKT_CONNECT    = "CONNECT"
+# PACKET TYPES
+PKT_CONNECT = "CONNECT"
 PKT_DISCONNECT = "DISCONNECT"
-PKT_ACK        = "ACK"
-PKT_JOIN_OK    = "JOIN_OK"
+PKT_ACK = "ACK"
+PKT_JOIN_OK = "JOIN_OK"
 PKT_GAME_STATE = "GAME_STATE"
-PKT_INPUT      = "INPUT"
+PKT_INPUT = "INPUT"
 PKT_PLAYER_JOIN = "PLAYER_JOIN"
 PKT_PLAYER_QUIT = "PLAYER_QUIT"
 
-# COLORS 
-BG_COLOR        = (15, 15, 25)
-GRID_COLOR      = (30, 30, 50)
-GROUND_COLOR    = (25, 25, 40)
-UI_BG           = (10, 10, 20, 200)
-WHITE           = (255, 255, 255)
-GRAY            = (120, 120, 140)
-SHADOW          = (0, 0, 0, 80)
+# COLORS
+BG_COLOR = (15, 15, 25)
+GRID_COLOR = (30, 30, 50)
+GROUND_COLOR = (25, 25, 40)
+UI_BG = (10, 10, 20, 200)
+WHITE = (255, 255, 255)
+GRAY = (120, 120, 140)
+SHADOW = (0, 0, 0, 80)
+
 
 def hex_to_rgb(h):
     h = h.lstrip("#")
-    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+    return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
 
-# NETWORK CLIENT 
+
+# NETWORK CLIENT
+
 
 class NetworkClient:
     def __init__(self, host, port, name):
@@ -66,12 +70,12 @@ class NetworkClient:
         self.lock = threading.Lock()
 
         # Authoritative state for all players
-        self.server_players = {}   # pid -> {x, y, color, name, last_input_seq}
+        self.server_players = {}  # pid -> {x, y, color, name, last_input_seq}
 
         # Client prediction
         self.local_x = 0.0
         self.local_y = 0.0
-        self.input_history = []    # list of {seq, dx, dy, dt, time}
+        self.input_history = []  # list of {seq, dx, dy, dt, time}
         self.input_seq = 0
 
         # Interpolation buffer for remote players
@@ -79,8 +83,9 @@ class NetworkClient:
         self.interp_buffer = {}
 
         # Reliable ACK tracking
-        self.pending_acks = {}     # seq -> {packet, retries, last_sent}
+        self.pending_acks = {}  # seq -> {packet, retries, last_sent}
         self.out_seq = 0
+        self.ack_lock = threading.Lock()
 
         # World size from server
         self.world_w = WORLD_W
@@ -92,7 +97,7 @@ class NetworkClient:
         threading.Thread(target=self._recv_loop, daemon=True).start()
         threading.Thread(target=self._ack_retry_loop, daemon=True).start()
 
-    # SEND HELPERS 
+    # SEND HELPERS
 
     def _encode(self, data):
         return json.dumps(data).encode()
@@ -109,17 +114,18 @@ class NetworkClient:
 
     def _send_reliable(self, data):
         seq = data["seq"]
-        self.pending_acks[seq] = {
-            "packet": data,
-            "retries": 0,
-            "last_sent": time.time()
-        }
+        with self.ack_lock:
+            self.pending_acks[seq] = {
+                "packet": data,
+                "retries": 0,
+                "last_sent": time.time(),
+            }
         self._send(data)
 
     def _ack(self, seq):
         self._send({"type": PKT_ACK, "seq": seq})
 
-    # CONNECT 
+    # CONNECT
 
     def connect(self):
         self._send({"type": PKT_CONNECT, "name": self.name})
@@ -127,7 +133,7 @@ class NetworkClient:
     def disconnect(self):
         self._send({"type": PKT_DISCONNECT})
 
-    # INPUT SENDING 
+    # INPUT SENDING
     def send_input(self, dx, dy, dt):
         if not self.connected:
             return
@@ -139,32 +145,40 @@ class NetworkClient:
             "dx": dx,
             "dy": dy,
             "dt": dt,
-            "t": time.time()
+            "t": time.time(),
         }
         # Store for reconciliation
-        self.input_history.append({
-            "seq": seq,
-            "dx": dx,
-            "dy": dy,
-            "dt": dt,
-            "x_before": self.local_x,
-            "y_before": self.local_y
-        })
+        self.input_history.append(
+            {
+                "seq": seq,
+                "dx": dx,
+                "dy": dy,
+                "dt": dt,
+                "x_before": self.local_x,
+                "y_before": self.local_y,
+            }
+        )
         # Keep history bounded
         if len(self.input_history) > 120:
             self.input_history.pop(0)
 
         self._send(packet)  # Input is unreliable (high frequency)
 
-    # PREDICTION 
+    # PREDICTION
     def predict_move(self, dx, dy, dt):
         """Apply movement locally immediately (client-side prediction)."""
+        r = PLAYER_RADIUS
         if dx != 0 or dy != 0:
-            length = math.sqrt(dx*dx + dy*dy)
+            length = math.sqrt(dx * dx + dy * dy)
             dx /= length
             dy /= length
-        self.local_x = max(20, min(self.world_w - 20, self.local_x + dx * PLAYER_SPEED * dt))
-        self.local_y = max(20, min(self.world_h - 20, self.local_y + dy * PLAYER_SPEED * dt))
+
+        self.local_x = max(
+            r, min(self.world_w - r, self.local_x + dx * PLAYER_SPEED * dt)
+        )
+        self.local_y = max(
+            r, min(self.world_h - r, self.local_y + dy * PLAYER_SPEED * dt)
+        )
 
     def reconcile(self, server_x, server_y, last_acked_seq):
         """
@@ -173,7 +187,10 @@ class NetworkClient:
         2. Re-apply all unacknowledged inputs on top
         """
         # Remove acknowledged inputs
-        self.input_history = [i for i in self.input_history if i["seq"] > last_acked_seq]
+        r = PLAYER_RADIUS
+        self.input_history = [
+            i for i in self.input_history if i["seq"] > last_acked_seq
+        ]
 
         # Start from server state
         rx, ry = server_x, server_y
@@ -183,16 +200,16 @@ class NetworkClient:
             dx, dy = inp["dx"], inp["dy"]
             dt = inp["dt"]
             if dx != 0 or dy != 0:
-                length = math.sqrt(dx*dx + dy*dy)
+                length = math.sqrt(dx * dx + dy * dy)
                 dx /= length
                 dy /= length
-            rx = max(20, min(self.world_w - 20, rx + dx * PLAYER_SPEED * dt))
-            ry = max(20, min(self.world_h - 20, ry + dy * PLAYER_SPEED * dt))
+            rx = max(r, min(self.world_w - r, rx + dx * PLAYER_SPEED * dt))
+            ry = max(r, min(self.world_h - r, ry + dy * PLAYER_SPEED * dt))
 
         self.local_x = rx
         self.local_y = ry
 
-    # INTERPOLATION 
+    # INTERPOLATION
     def get_interpolated_pos(self, pid, now):
         """Return interpolated position for a remote player."""
         buf = self.interp_buffer.get(pid, [])
@@ -227,7 +244,7 @@ class NetworkClient:
         iy = before["y"] + (after["y"] - before["y"]) * alpha
         return ix, iy
 
-    # RECEIVE LOOP 
+    # RECEIVE LOOP
     def _recv_loop(self):
         while True:
             try:
@@ -275,11 +292,9 @@ class NetworkClient:
                         # Buffer remote player snapshot for interpolation
                         if pid not in self.interp_buffer:
                             self.interp_buffer[pid] = []
-                        self.interp_buffer[pid].append({
-                            "t": now,
-                            "x": srv_x,
-                            "y": srv_y
-                        })
+                        self.interp_buffer[pid].append(
+                            {"t": now, "x": srv_x, "y": srv_y}
+                        )
                         # Keep buffer size reasonable (last 2 seconds)
                         cutoff = now - 2.0
                         self.interp_buffer[pid] = [
@@ -292,8 +307,10 @@ class NetworkClient:
             pid = data["pid"]
             with self.lock:
                 self.server_players[pid] = {
-                    "x": data["x"], "y": data["y"],
-                    "color": data["color"], "name": data["name"]
+                    "x": data["x"],
+                    "y": data["y"],
+                    "color": data["color"],
+                    "name": data["name"],
                 }
                 self.interp_buffer[pid] = []
             print(f"[CLIENT] {data['name']} joined")
@@ -308,7 +325,8 @@ class NetworkClient:
 
         elif ptype == PKT_ACK:
             seq = data.get("seq")
-            self.pending_acks.pop(seq, None)
+            with self.ack_lock:
+                self.pending_acks.pop(seq, None)
 
         elif ptype == "FULL":
             print("[CLIENT] Server is full!")
@@ -316,18 +334,20 @@ class NetworkClient:
     def _ack_retry_loop(self):
         while True:
             now = time.time()
-            for seq, info in list(self.pending_acks.items()):
-                if now - info["last_sent"] > 0.1:
-                    if info["retries"] >= 10:
-                        self.pending_acks.pop(seq, None)
-                    else:
-                        self._send(info["packet"])
-                        info["retries"] += 1
-                        info["last_sent"] = now
+            with self.ack_lock:
+                for seq, info in list(self.pending_acks.items()):
+                    if now - info["last_sent"] > 0.1:
+                        if info["retries"] > 10:
+                            self.pending_acks.pop(seq, None)
+                        else:
+                            self._send(info["packet"])
+                            info["retries"] += 1
+                            info["last_sent"] = now
             time.sleep(0.01)
 
 
 # RENDERER
+
 
 class GameRenderer:
     def __init__(self, client: NetworkClient):
@@ -337,9 +357,9 @@ class GameRenderer:
         self.screen = pygame.display.set_mode((WORLD_W, WORLD_H))
         pygame.display.set_caption("UDP Multiplayer — Connecting...")
         self.clock = pygame.time.Clock()
-        #We keep the code compatible for both Linux and Windows System.
-        self.font_lg  = pygame.font.Font(None, 22)
-        self.font_sm  = pygame.font.Font(None, 16)
+        # We keep the code compatible for both Linux and Windows System.
+        self.font_lg = pygame.font.Font(None, 22)
+        self.font_sm = pygame.font.Font(None, 16)
         self.font_hud = pygame.font.Font(None, 18)
 
         # Trails for local player
@@ -362,7 +382,12 @@ class GameRenderer:
         # Border
         pygame.draw.rect(surf, (60, 60, 100), (0, 0, WORLD_W, WORLD_H), 3)
         # Corner markers
-        for cx, cy in [(20, 20), (WORLD_W-20, 20), (20, WORLD_H-20), (WORLD_W-20, WORLD_H-20)]:
+        for cx, cy in [
+            (20, 20),
+            (WORLD_W - 20, 20),
+            (20, WORLD_H - 20),
+            (WORLD_W - 20, WORLD_H - 20),
+        ]:
             pygame.draw.circle(surf, (80, 80, 120), (cx, cy), 8)
         return surf
 
@@ -380,7 +405,7 @@ class GameRenderer:
             # Glow effect
             for r in range(22, 12, -2):
                 glow_alpha = max(0, 80 - (22 - r) * 15)
-                glow_surf = pygame.Surface((r*2, r*2), pygame.SRCALPHA)
+                glow_surf = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
                 pygame.draw.circle(glow_surf, (*rgb, glow_alpha), (r, r), r)
                 self.screen.blit(glow_surf, (ix - r, iy - r))
 
@@ -407,7 +432,7 @@ class GameRenderer:
         for i, (tx, ty) in enumerate(self.trail):
             alpha = int(200 * i / max(len(self.trail), 1))
             r = max(1, int(6 * i / max(len(self.trail), 1)))
-            trail_surf = pygame.Surface((r*2, r*2), pygame.SRCALPHA)
+            trail_surf = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
             pygame.draw.circle(trail_surf, (0, 255, 170, alpha), (r, r), r)
             self.screen.blit(trail_surf, (int(tx) - r, int(ty) - r))
 
@@ -428,7 +453,9 @@ class GameRenderer:
         ]
         if my_pid is not None:
             with self.client.lock:
-                lines.append(f"Pos: ({self.client.local_x:.0f}, {self.client.local_y:.0f})")
+                lines.append(
+                    f"Pos: ({self.client.local_x:.0f}, {self.client.local_y:.0f})"
+                )
                 lines.append(f"Unacked inputs: {len(self.client.input_history)}")
 
         hud_w = 220
@@ -442,10 +469,7 @@ class GameRenderer:
         self.screen.blit(hud, (8, 8))
 
     def _draw_legend(self):
-        controls = [
-            "WASD / Arrow keys: Move",
-            "ESC: Quit"
-        ]
+        controls = ["WASD / Arrow keys: Move", "ESC: Quit"]
         y = WORLD_H - 14 * len(controls) - 10
         for line in controls:
             txt = self.font_sm.render(line, True, GRAY)
@@ -464,7 +488,7 @@ class GameRenderer:
             dt = self.clock.tick(60) / 1000.0
             now = time.time()
 
-            # EVENTS 
+            # EVENTS
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     c.disconnect()
@@ -475,13 +499,17 @@ class GameRenderer:
                     pygame.quit()
                     return
 
-            # INPUT 
+            # INPUT
             keys = pygame.key.get_pressed()
             dx, dy = 0.0, 0.0
-            if keys[pygame.K_w] or keys[pygame.K_UP]:    dy -= 1
-            if keys[pygame.K_s] or keys[pygame.K_DOWN]:  dy += 1
-            if keys[pygame.K_a] or keys[pygame.K_LEFT]:  dx -= 1
-            if keys[pygame.K_d] or keys[pygame.K_RIGHT]: dx += 1
+            if keys[pygame.K_w] or keys[pygame.K_UP]:
+                dy -= 1
+            if keys[pygame.K_s] or keys[pygame.K_DOWN]:
+                dy += 1
+            if keys[pygame.K_a] or keys[pygame.K_LEFT]:
+                dx -= 1
+            if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
+                dx += 1
 
             if c.connected:
                 # Predict locally
@@ -499,27 +527,30 @@ class GameRenderer:
                     last_trail_time = now
                     # Spawn particle
                     import random
-                    self.particles.append({
-                        "x": c.local_x + random.uniform(-4, 4),
-                        "y": c.local_y + random.uniform(-4, 4),
-                        "vx": random.uniform(-20, 20),
-                        "vy": random.uniform(-30, 10),
-                        "life": 0.4,
-                        "max_life": 0.4,
-                        "color": "#00FFAA"
-                    })
+
+                    self.particles.append(
+                        {
+                            "x": c.local_x + random.uniform(-4, 4),
+                            "y": c.local_y + random.uniform(-4, 4),
+                            "vx": random.uniform(-20, 20),
+                            "vy": random.uniform(-30, 10),
+                            "life": 0.4,
+                            "max_life": 0.4,
+                            "color": "#00FFAA",
+                        }
+                    )
                 elif dx == 0 and dy == 0:
                     if self.trail:
                         self.trail.pop(0)
 
-            # UPDATE PARTICLES 
+            # UPDATE PARTICLES
             for p in self.particles:
                 p["x"] += p["vx"] * dt
                 p["y"] += p["vy"] * dt
                 p["life"] -= dt
             self.particles = [p for p in self.particles if p["life"] > 0]
 
-            # DRAW 
+            # DRAW
             self.screen.blit(self.bg, (0, 0))
             self._draw_trail()
             self._draw_particles()
@@ -547,8 +578,10 @@ class GameRenderer:
             self._draw_legend()
 
             if not c.connected:
-                msg = self.font_lg.render("Connecting to server...", True, (200, 200, 100))
-                self.screen.blit(msg, msg.get_rect(center=(WORLD_W//2, WORLD_H//2)))
+                msg = self.font_lg.render(
+                    "Connecting to server...", True, (200, 200, 100)
+                )
+                self.screen.blit(msg, msg.get_rect(center=(WORLD_W // 2, WORLD_H // 2)))
 
             pygame.display.flip()
 
