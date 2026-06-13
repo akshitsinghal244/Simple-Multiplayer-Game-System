@@ -27,6 +27,7 @@ _ID: dict[str, int] = {
     "PLAYER_JOIN": 0x07,
     "PLAYER_QUIT": 0x08,
     "FULL":        0x09,
+    "CHAT":        0x0A,
 }
 _TYPE: dict[int, str] = {v: k for k, v in _ID.items()}
 
@@ -44,6 +45,8 @@ _FMT_GAME_HDR    = "!BdB"                                    # 10 B  + N×36
 _FMT_JOIN_OK_HDR = f"!BIBff{COLOR_LEN}s{NAME_LEN}sHHB"     # 42 B  + N×36
 _FMT_PLAYER_JOIN = f"!BIBff{COLOR_LEN}s{NAME_LEN}s"        # 37 B
 _FMT_PLAYER_QUIT = f"!BIB{NAME_LEN}s"                       # 26 B
+_MSG_LEN         = 100
+_FMT_CHAT        = f"!BIB{NAME_LEN}s{_MSG_LEN}s"            # 126 B
 
 _PREC_SIZE = struct.calcsize(_FMT_PLAYER_REC)   # 36
 
@@ -141,6 +144,14 @@ def _enc_player_quit(d: dict) -> bytes:
 def _enc_full(_: dict) -> bytes:
     return struct.pack("!B", _ID["FULL"])
 
+def _enc_chat(d: dict) -> bytes:
+    msg = d["message"].encode("utf-8")[:_MSG_LEN].ljust(_MSG_LEN, b"\x00")
+    return struct.pack(
+        _FMT_CHAT,
+        _ID["CHAT"], d["seq"], d["pid"],
+        _pack_name(d["name"]), msg,
+    )
+
 _ENCODERS: dict = {
     "CONNECT":     _enc_connect,
     "DISCONNECT":  _enc_disconnect,
@@ -151,6 +162,7 @@ _ENCODERS: dict = {
     "PLAYER_JOIN": _enc_player_join,
     "PLAYER_QUIT": _enc_player_quit,
     "FULL":        _enc_full,
+    "CHAT":        _enc_chat,
 }
 
 # Decoders
@@ -213,6 +225,16 @@ def _dec_player_quit(raw: bytes) -> dict:
 def _dec_full(_: bytes) -> dict:
     return {"type": "FULL"}
 
+def _dec_chat(raw: bytes) -> dict:
+    _, seq, pid, name_b, msg_b = struct.unpack(_FMT_CHAT, raw)
+    return {
+        "type": "CHAT",
+        "seq": seq,
+        "pid": pid,
+        "name": _unpack_name(name_b),
+        "message": msg_b.rstrip(b"\x00").decode("utf-8"),
+    }
+
 _DECODERS: dict[int, object] = {
     0x01: _dec_connect,
     0x02: _dec_disconnect,
@@ -223,6 +245,7 @@ _DECODERS: dict[int, object] = {
     0x07: _dec_player_join,
     0x08: _dec_player_quit,
     0x09: _dec_full,
+    0x0A: _dec_chat,
 }
 
 # Public API

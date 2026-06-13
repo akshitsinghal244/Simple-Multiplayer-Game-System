@@ -37,6 +37,7 @@ PKT_GAME_STATE = "GAME_STATE"
 PKT_INPUT = "INPUT"
 PKT_PLAYER_JOIN = "PLAYER_JOIN"
 PKT_PLAYER_QUIT = "PLAYER_QUIT"
+PKT_CHAT = "CHAT"
 
 SPAWN_POSITIONS = [
     (200, 200),
@@ -339,6 +340,27 @@ def handle_disconnect(addr, data):
     if pid is not None:
         disconnect_player(pid, addr)
 
+def handle_chat(addr, data):
+    with lock:
+        pid = addr_to_pid.get(addr)
+        if pid is None:
+            return
+        name = players[pid]["name"]
+
+    msg = str(data.get("message", "")).strip()
+    if not msg or len(msg) > 100:
+        return
+
+    print(f"[CHAT] {name}: {msg}")
+
+    broadcast({
+        "type": PKT_CHAT,
+        "seq": 0,
+        "pid": pid,
+        "name": name,
+        "message": msg,
+    })
+
 
 # RECEIVE LOOP
 
@@ -347,6 +369,7 @@ HANDLERS = {
     PKT_INPUT: handle_input,
     PKT_ACK: handle_ack,
     PKT_DISCONNECT: handle_disconnect,
+    PKT_CHAT: handle_chat,
 }
 
 
@@ -390,6 +413,8 @@ def recv_loop():
             elif ptype == PKT_ACK:
                 seq = data.get("seq", "?")
                 print(f"[PKT] ACK       from {name:<12} seq={seq}")
+            elif ptype == PKT_CHAT:
+                print(f"[PKT] CHAT       from {name:<12} msg='{data.get('message','')[:30]}'")
             else:
                 print(f"[PKT] {ptype:<12} from {addr[0]}:{addr[1]}")
             # END LOG
