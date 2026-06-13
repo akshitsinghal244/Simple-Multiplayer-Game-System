@@ -7,13 +7,13 @@ UDP Multiplayer Game Server
 """
 
 import socket
-import json
 import time
 import threading
 import struct
 import random
 import math
 from collections import defaultdict
+from packets import encode, decode
 
 # CONFIG
 HOST = "0.0.0.0"
@@ -63,14 +63,6 @@ sock.settimeout(0.01)
 # HELPERS
 
 
-def encode(data: dict) -> bytes:
-    return json.dumps(data).encode()
-
-
-def decode(raw: bytes) -> dict:
-    return json.loads(raw.decode())
-
-
 def send(addr, data: dict):
     try:
         sock.sendto(encode(data), addr)
@@ -92,9 +84,8 @@ def next_seq(addr):
 
 def broadcast(data: dict, exclude=None):
     with lock:
-        targets = list(players.keys())
-    for pid in targets:
-        addr = players[pid]["addr"]
+        targets = [(pid, p["addr"]) for pid, p in players.items()]
+    for pid, addr in targets:
         if addr != exclude:
             send(addr, data)
 
@@ -102,9 +93,8 @@ def broadcast(data: dict, exclude=None):
 def broadcast_reliable(data_fn, exclude=None):
     """data_fn(addr) -> dict — so each gets unique seq"""
     with lock:
-        targets = list(players.keys())
-    for pid in targets:
-        addr = players[pid]["addr"]
+        targets = [(pid, p["addr"]) for pid, p in players.items()]
+    for pid, addr in targets:
         if addr != exclude:
             data = data_fn(addr)
             send_reliable(addr, data)
@@ -175,8 +165,14 @@ def tick_loop():
                     length = math.sqrt(dx * dx + dy * dy)
                     dx /= length
                     dy /= length
-                p["x"] = max(20, min(WORLD_W - 20, p["x"] + dx * PLAYER_SPEED * dt))
-                p["y"] = max(20, min(WORLD_H - 20, p["y"] + dy * PLAYER_SPEED * dt))
+                p["x"] = max(
+                    PLAYER_RADIUS,
+                    min(WORLD_W - PLAYER_RADIUS, p["x"] + dx * PLAYER_SPEED * dt),
+                )
+                p["y"] = max(
+                    PLAYER_RADIUS,
+                    min(WORLD_H - PLAYER_RADIUS, p["y"] + dy * PLAYER_SPEED * dt),
+                )
                 p["last_input_seq"] = inp.get("seq", 0)
 
             # COLLISION RESOLUTION
@@ -397,9 +393,10 @@ def recv_loop():
             else:
                 print(f"[PKT] {ptype:<12} from {addr[0]}:{addr[1]}")
             # END LOG
-            handler = HANDLERS.get(ptype)
-            if handler:
-                handler(addr, data)
+            if isinstance(ptype, str):
+                handler = HANDLERS.get(ptype)
+                if handler:
+                    handler(addr, data)
         except socket.timeout:
             pass
         except Exception as e:

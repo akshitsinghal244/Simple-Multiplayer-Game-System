@@ -11,12 +11,12 @@ Usage:
 """
 
 import socket
-import json
 import time
 import threading
 import sys
 import math
 import pygame
+from packets import encode, decode
 
 # CONFIG
 DEFAULT_HOST = "localhost"
@@ -100,7 +100,7 @@ class NetworkClient:
     # SEND HELPERS
 
     def _encode(self, data):
-        return json.dumps(data).encode()
+        return encode(data)
 
     def _send(self, data):
         try:
@@ -249,7 +249,7 @@ class NetworkClient:
         while True:
             try:
                 raw, _ = self.sock.recvfrom(8192)
-                data = json.loads(raw.decode())
+                data = decode(raw)
                 self._handle(data)
             except socket.timeout:
                 pass
