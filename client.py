@@ -11,12 +11,13 @@ Usage:
 """
 
 import socket
-import json
 import time
 import threading
 import sys
 import math
 import pygame
+from packets import encode, decode
+from gui import *
 
 # CONFIG
 DEFAULT_HOST = "localhost"
@@ -37,6 +38,7 @@ PKT_GAME_STATE = "GAME_STATE"
 PKT_INPUT = "INPUT"
 PKT_PLAYER_JOIN = "PLAYER_JOIN"
 PKT_PLAYER_QUIT = "PLAYER_QUIT"
+PKT_CHAT = "CHAT"
 
 # COLORS
 BG_COLOR = (15, 15, 25)
@@ -100,7 +102,7 @@ class NetworkClient:
     # SEND HELPERS
 
     def _encode(self, data):
-        return json.dumps(data).encode()
+        return encode(data)
 
     def _send(self, data):
         try:
@@ -132,6 +134,21 @@ class NetworkClient:
 
     def disconnect(self):
         self._send({"type": PKT_DISCONNECT})
+
+    def reconnect(self):
+        if not self.connected:
+            self._send({"type": PKT_CONNECT, "name": self.name})
+
+    def send_chat(self, message: str):
+        if not self.connected:
+            return
+        self._send({
+            "type": PKT_CHAT,
+            "seq": self._next_seq(),
+            "pid": self.my_pid or 0,
+            "name": self.name,
+            "message": message,
+        })
 
     # INPUT SENDING
     def send_input(self, dx, dy, dt):
@@ -249,7 +266,7 @@ class NetworkClient:
         while True:
             try:
                 raw, _ = self.sock.recvfrom(8192)
-                data = json.loads(raw.decode())
+                data = decode(raw)
                 self._handle(data)
             except socket.timeout:
                 pass
@@ -273,6 +290,8 @@ class NetworkClient:
                     self.server_players[pid] = p.copy()
                     self.interp_buffer[pid] = []
                 self.connected = True
+                if hasattr(self, "_on_chat"):
+                    pass
             print(f"[CLIENT] Joined as '{data['name']}' (pid={data['pid']})")
 
         elif ptype == PKT_GAME_STATE:
@@ -331,6 +350,12 @@ class NetworkClient:
         elif ptype == "FULL":
             print("[CLIENT] Server is full!")
 
+        elif ptype == PKT_CHAT:  # ← add from here
+            name = data.get("name", "?")
+            msg = data.get("message", "")
+            if hasattr(self, "_on_chat"):
+                self._on_chat(name, msg)
+
     def _ack_retry_loop(self):
         while True:
             now = time.time()
@@ -346,6 +371,8 @@ class NetworkClient:
             time.sleep(0.01)
 
 
+
+
 # RENDERER
 
 
@@ -358,6 +385,17 @@ class GameRenderer:
         pygame.display.set_caption("UDP Multiplayer — Connecting...")
         self.clock = pygame.time.Clock()
         # We keep the code compatible for both Linux and Windows System.
+
+        self.clock = pygame.time.Clock()
+
+        self.hud = HUD(  # ← add this block
+            WORLD_W, WORLD_H,
+            on_connect=client.reconnect,
+            on_disconnect=client.disconnect,
+        )
+        client._on_chat = self.hud.add_chat  # wire chat arrival → log
+
+
         self.font_lg = pygame.font.Font(None, 22)
         self.font_sm = pygame.font.Font(None, 16)
         self.font_hud = pygame.font.Font(None, 18)
@@ -490,26 +528,31 @@ class GameRenderer:
 
             # EVENTS
             for event in pygame.event.get():
+                self.hud.handle_event(event)
                 if event.type == pygame.QUIT:
                     c.disconnect()
                     pygame.quit()
                     return
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                    c.disconnect()
-                    pygame.quit()
-                    return
+                    if self.hud.is_chat_open():
+                        pass
+                    else:
+                        c.disconnect()
+                        pygame.quit()
+                        return
 
             # INPUT
             keys = pygame.key.get_pressed()
             dx, dy = 0.0, 0.0
-            if keys[pygame.K_w] or keys[pygame.K_UP]:
-                dy -= 1
-            if keys[pygame.K_s] or keys[pygame.K_DOWN]:
-                dy += 1
-            if keys[pygame.K_a] or keys[pygame.K_LEFT]:
-                dx -= 1
-            if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
-                dx += 1
+            if not self.hud.is_chat_open():
+                if keys[pygame.K_w] or keys[pygame.K_UP]:
+                    dy -= 1
+                if keys[pygame.K_s] or keys[pygame.K_DOWN]:
+                    dy += 1
+                if keys[pygame.K_a] or keys[pygame.K_LEFT]:
+                    dx -= 1
+                if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
+                    dx += 1
 
             if c.connected:
                 # Predict locally
@@ -576,6 +619,12 @@ class GameRenderer:
             fps = self.clock.get_fps()
             self._draw_hud(fps, my_pid)
             self._draw_legend()
+            self.hud.set_state("connected" if c.connected else "disconnected")
+            self.hud.tick(dt)
+            msg = self.hud.consume_chat()
+            if msg:
+                c.send_chat(msg)
+            self.hud.draw(self.screen)
 
             if not c.connected:
                 msg = self.font_lg.render(
