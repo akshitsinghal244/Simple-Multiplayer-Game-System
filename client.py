@@ -42,6 +42,7 @@ PKT_CHAT = "CHAT"
 PKT_SHOOT = "SHOOT"
 PKT_SERVER_QUERY = "SERVER_QUERY"
 PKT_SERVER_INFO = "SERVER_INFO"
+PKT_RESPAWN = "RESPAWN"
 
 BULLET_RADIUS = 5
 BULLET_COLOR  = (255, 240, 80)
@@ -102,6 +103,9 @@ class NetworkClient:
 
         # Bullets from last GAME_STATE
         self.server_bullets = {}  # bid -> {x, y, owner, dx, dy}
+
+        # Death state tracking (edge-detect for HUD notifications)
+        self._was_dead = False
 
         self.ping_ms = 0
         self._ping_send_time = 0
@@ -167,6 +171,11 @@ class NetworkClient:
             "dx": dx,
             "dy": dy,
         })
+
+    def send_respawn(self):
+        if not self.connected:
+            return
+        self._send({"type": PKT_RESPAWN})
 
     def send_chat(self, message: str):
         if not self.connected:
@@ -423,10 +432,14 @@ class GameRenderer:
             client.disconnect()
             self._return_to_lobby = True
 
+        def _on_respawn():
+            client.send_respawn()
+
         self.hud = HUD(
             WORLD_W, WORLD_H,
             on_connect=client.reconnect,
             on_disconnect=_on_disconnect,
+            on_respawn=_on_respawn,
         )
         client._on_chat = self.hud.add_chat  # wire chat arrival → log
 
@@ -599,6 +612,12 @@ class GameRenderer:
         last_input_time = time.time()
         last_trail_time = time.time()
 
+        # Initialise per-frame snapshots so event loop can always read them
+        my_pid = None
+        players_snap = {}
+        lx, ly = 0.0, 0.0
+        bullets_snap = {}
+
         while True:
             dt = self.clock.tick(60) / 1000.0
             now = time.time()
@@ -627,14 +646,17 @@ class GameRenderer:
                         return
                 if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
                         and c.connected and not self.hud.is_suppressed()):
-                    mx, my = event.pos
-                    with c.lock:
-                        ox, oy = c.local_x, c.local_y
-                    ddx = mx - ox
-                    ddy = my - oy
-                    length = math.sqrt(ddx*ddx + ddy*ddy)
-                    if length > 1e-6:
-                        c.send_shoot(ddx / length, ddy / length)
+                    # Don't shoot while dead
+                    is_dead = my_pid is not None and players_snap.get(my_pid, {}).get("dead", False)
+                    if not is_dead:
+                        mx, my = event.pos
+                        with c.lock:
+                            ox, oy = c.local_x, c.local_y
+                        ddx = mx - ox
+                        ddy = my - oy
+                        length = math.sqrt(ddx*ddx + ddy*ddy)
+                        if length > 1e-6:
+                            c.send_shoot(ddx / length, ddy / length)
 
             # INPUT
             keys = pygame.key.get_pressed()
@@ -700,6 +722,20 @@ class GameRenderer:
                 lx, ly = c.local_x, c.local_y
                 bullets_snap = dict(c.server_bullets)
 
+            # Death / respawn edge detection → notify HUD
+            if my_pid is not None and my_pid in players_snap:
+                is_dead_now = players_snap[my_pid].get("dead", False)
+                if is_dead_now and not c._was_dead:
+                    self.hud.notify_death()
+                elif not is_dead_now and c._was_dead:
+                    self.hud.notify_respawn()
+                    # Reset prediction to server-confirmed position on respawn
+                    with c.lock:
+                        c.local_x = players_snap[my_pid].get("x", c.local_x)
+                        c.local_y = players_snap[my_pid].get("y", c.local_y)
+                        c.input_history.clear()
+                c._was_dead = is_dead_now
+
             # Draw bullets
             self._draw_bullets(bullets_snap)
 
@@ -707,15 +743,18 @@ class GameRenderer:
             for pid, p in players_snap.items():
                 if pid == my_pid:
                     continue
+                if p.get("dead", False):
+                    continue  # hide dead remote players
                 ix, iy = c.get_interpolated_pos(pid, now)
                 self._draw_player(ix, iy, p["color"], p["name"],
                                   health=p.get("health", 150), is_local=False)
 
-            # Draw local player (predicted)
+            # Draw local player (predicted) — only if alive
             if my_pid is not None and my_pid in players_snap:
                 p = players_snap[my_pid]
-                self._draw_player(lx, ly, p["color"], p["name"],
-                                  health=p.get("health", 150), is_local=True)
+                if not p.get("dead", False):
+                    self._draw_player(lx, ly, p["color"], p["name"],
+                                      health=p.get("health", 150), is_local=True)
 
             # HUD
             fps = self.clock.get_fps()
@@ -733,7 +772,7 @@ class GameRenderer:
             msg = self.hud.consume_chat()
             if msg:
                 c.send_chat(msg)
-            self.hud.draw(self.screen)
+            self.hud.draw(self.screen, players_snap, my_pid)
 
             if not c.connected:
                 msg = self.font_lg.render(
