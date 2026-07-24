@@ -272,6 +272,54 @@ class Button:
         surface.blit(label_surf, (lx, ly))
 
 
+# Disconnect Popup
+class DisconnectOverlay:
+    """Full-screen modal shown on disconnect. Blocks all game input."""
+
+    def __init__(self, on_reconnect: Callable):
+        self.visible      = False
+        self._btn = Button("Reconnect", accent=_C["accent"], on_click=on_reconnect)
+
+    def show(self): self.visible = True
+    def hide(self): self.visible = False
+
+    def handle_event(self, event: pygame.event.Event):
+        if not self.visible:
+            return
+        self._btn.handle_event(event)
+
+    def draw(self, surface: pygame.Surface):
+        if not self.visible:
+            return
+        sw, sh = surface.get_size()
+
+        # Dark overlay
+        overlay = pygame.Surface((sw, sh), pygame.SRCALPHA)
+        overlay.fill((10, 12, 18, 200))
+        surface.blit(overlay, (0, 0))
+
+        # Panel
+        pw, ph = 320, 140
+        px, py = (sw - pw) // 2, (sh - ph) // 2
+        panel = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        panel.fill(_C["panel"])
+        surface.blit(panel, (px, py))
+        pygame.draw.rect(surface, _C["danger"], (px, py, pw, ph), 1, border_radius=6)
+
+        # Title
+        title = _FONT_UI.render("You are disconnected", True, _C["text"])
+        surface.blit(title, (px + (pw - title.get_width()) // 2, py + 28))
+
+        # Subtitle
+        sub = _FONT_SMALL.render("Press Reconnect to rejoin the server", True, _C["dim"])
+        surface.blit(sub, (px + (pw - sub.get_width()) // 2, py + 54))
+
+        # Reconnect button — centered
+        self._btn.rect.w = 120
+        self._btn.set_pos(px + (pw - 120) // 2, py + 90)
+        self._btn.draw(surface)
+
+
 # HUD
 
 class HUD:
@@ -307,19 +355,26 @@ class HUD:
         self._chat_log   = ChatLog()
         self._text_input = TextInput()
 
+        def _on_disconnect_clicked():
+            self._overlay.show()
+            if on_disconnect:
+                on_disconnect()
+
         self._btn_connect = Button(
             "Connect",
-            accent   = _C["accent"],
-            on_click = on_connect,
+            accent=_C["accent"],
+            on_click=on_connect,
         )
         self._btn_disconnect = Button(
             "Disconnect",
-            accent   = _C["danger"],
-            on_click = on_disconnect,
+            accent=_C["danger"],
+            on_click=_on_disconnect_clicked,
         )
-
+        self._overlay = DisconnectOverlay(on_connect)
+        self._overlay.hide()
         self._layout()
-        self.set_state("disconnected")
+        self.set_state("disconnected", initial = True)
+
 
     # Layout
 
@@ -361,20 +416,22 @@ class HUD:
 
     # State
 
-    def set_state(self, state: str):
-        """'disconnected' | 'connecting' | 'connected'"""
+    def set_state(self, state: str, initial: bool = False):
         self._state = state
         if state == "disconnected":
-            self._btn_connect.disabled    = False
+            self._btn_connect.disabled = False
             self._btn_disconnect.disabled = True
+            if not initial:
+                self._overlay.show()
         elif state == "connecting":
-            self._btn_connect.disabled    = True
+            self._btn_connect.disabled = True
             self._btn_disconnect.disabled = True
+            self._overlay.hide()
         elif state == "connected":
-            self._btn_connect.disabled    = True
+            self._btn_connect.disabled = True
             self._btn_disconnect.disabled = False
-
-    # ── Public API ────────────────────────────────────────────────────────────
+            self._overlay.hide()
+            # ── Public API ────────────────────────────────────────────────────────────
 
     def add_chat(self, name: str, message: str):
         self._chat_log.add(name, message)
@@ -399,6 +456,9 @@ class HUD:
 
     def handle_event(self, event: pygame.event.Event):
         # Always route mouse events to buttons
+        self._overlay.handle_event(event)
+        if self._overlay.visible:
+            return
         self._btn_connect.handle_event(event)
         self._btn_disconnect.handle_event(event)
 
@@ -436,6 +496,7 @@ class HUD:
     def draw(self, screen: pygame.Surface):
         self._draw_chat_panel(screen)
         self._draw_top_bar(screen)
+        self._overlay.draw(screen)
 
     def _draw_chat_panel(self, screen: pygame.Surface):
         # Only draw the panel bg when chat is open or recent messages exist
@@ -493,3 +554,9 @@ class HUD:
 
         self._btn_connect.draw(screen)
         self._btn_disconnect.draw(screen)
+
+    def is_suppressed(self) -> bool:
+        """True when game input should be blocked (chat open or overlay visible)."""
+        return self._chat_open or self._overlay.visible
+
+
