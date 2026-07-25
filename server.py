@@ -38,6 +38,12 @@ PKT_INPUT = "INPUT"
 PKT_PLAYER_JOIN = "PLAYER_JOIN"
 PKT_PLAYER_QUIT = "PLAYER_QUIT"
 PKT_CHAT = "CHAT"
+PKT_SHOOT = "SHOOT"
+PKT_SERVER_QUERY = "SERVER_QUERY"
+PKT_SERVER_INFO = "SERVER_INFO"
+PKT_RESPAWN = "RESPAWN"
+SERVER_NAME = "Game Server"
+RESPAWN_DELAY = 5.0  # seconds before player can respawn
 
 SPAWN_POSITIONS = [
     (200, 200),
@@ -49,6 +55,12 @@ SPAWN_POSITIONS = [
 
 PLAYER_COLORS = ["#00FFAA", "#FF6B6B", "#FFD93D", "#6BCBFF", "#FF9FE5"]
 
+BULLET_SPEED  = 500.0   # units/sec
+BULLET_RADIUS = 5
+MAX_AMMO      = 10
+SHOOT_COOLDOWN = 1.0    # seconds between shots
+RELOAD_TIME    = 5.0    # seconds to reload empty chamber
+
 # SERVER STATE
 players = {}  # pid -> player dict
 addr_to_pid = {}  # addr -> pid
@@ -56,6 +68,9 @@ next_pid = 0
 lock = threading.Lock()
 seq_counter = defaultdict(int)  # addr -> outgoing seq
 pending_acks = {}  # (addr, seq) -> {packet, retries, last_sent}
+
+bullets = {}      # bid -> {x, y, dx, dy, owner_pid}
+next_bullet_id = 0
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -158,6 +173,8 @@ def tick_loop():
 
         with lock:
             for pid, p in players.items():
+                if p["dead"]:
+                    continue
                 # Apply last known input
                 inp = p.get("input", {})
                 dx = inp.get("dx", 0)
@@ -176,8 +193,8 @@ def tick_loop():
                 )
                 p["last_input_seq"] = inp.get("seq", 0)
 
-            # COLLISION RESOLUTION
-            pids = list(players.keys())
+            # COLLISION RESOLUTION (skip dead players)
+            pids = [k for k, p in players.items() if not p["dead"]]
             for i in range(len(pids)):
                 for j in range(i + 1, len(pids)):
                     a = players[pids[i]]
@@ -187,7 +204,6 @@ def tick_loop():
                     dist = math.sqrt(dx * dx + dy * dy)
                     min_dist = PLAYER_RADIUS * 2
                     if 0 < dist < min_dist:
-                        # Push both apart equally along collision axis
                         overlap = (min_dist - dist) / 2.0
                         nx = dx / dist
                         ny = dy / dist
@@ -208,6 +224,58 @@ def tick_loop():
                             min(WORLD_H - PLAYER_RADIUS, b["y"] + ny * overlap),
                         )
 
+            # RELOAD TIMERS
+            for p in players.values():
+                if p["reloading_since"] is not None:
+                    if now - p["reloading_since"] >= RELOAD_TIME:
+                        p["ammo"] = MAX_AMMO
+                        p["reloading_since"] = None
+
+            # BULLET MOVEMENT + COLLISION
+            dead_bullets = []
+            for bid, b in bullets.items():
+                b["x"] += b["dx"] * BULLET_SPEED * dt
+                b["y"] += b["dy"] * BULLET_SPEED * dt
+
+                # Wall collision
+                if (b["x"] < BULLET_RADIUS or b["x"] > WORLD_W - BULLET_RADIUS or
+                        b["y"] < BULLET_RADIUS or b["y"] > WORLD_H - BULLET_RADIUS):
+                    dead_bullets.append(bid)
+                    continue
+
+                # Player collision (skip dead players and owner)
+                for pid, p in players.items():
+                    if pid == b["owner"] or p["dead"]:
+                        continue
+                    dx = p["x"] - b["x"]
+                    dy = p["y"] - b["y"]
+                    if math.sqrt(dx*dx + dy*dy) < PLAYER_RADIUS + BULLET_RADIUS:
+                        damage = 20
+                        attacker_pid = b["owner"]
+                        p["health"] = max(0, p["health"] - damage)
+                        # Track damage for assists
+                        p["damage_dealt"][attacker_pid] = p["damage_dealt"].get(attacker_pid, 0) + damage
+                        dead_bullets.append(bid)
+                        print(f"[HIT] pid={pid} by pid={attacker_pid}, hp={p['health']}")
+
+                        if p["health"] <= 0 and not p["dead"]:
+                            p["dead"] = True
+                            p["dead_since"] = now
+                            p["deaths"] += 1
+                            # Credit kill to attacker
+                            if attacker_pid in players:
+                                players[attacker_pid]["kills"] += 1
+                            # Credit assists: anyone else who dealt damage (not the killer)
+                            for dmg_pid in list(p["damage_dealt"].keys()):
+                                if dmg_pid != attacker_pid and dmg_pid in players:
+                                    players[dmg_pid]["assists"] += 1
+                            p["damage_dealt"] = {}
+                            print(f"[KILL] pid={pid} killed by pid={attacker_pid}")
+                        break
+
+            for bid in dead_bullets:
+                bullets.pop(bid, None)
+
             state = {
                 "type": PKT_GAME_STATE,
                 "t": now,
@@ -218,8 +286,22 @@ def tick_loop():
                         "color": p["color"],
                         "name": p["name"],
                         "last_input_seq": p.get("last_input_seq", 0),
+                        "health": p.get("health", 150),
+                        "ammo": p.get("ammo", MAX_AMMO),
+                        "kills": p.get("kills", 0),
+                        "assists": p.get("assists", 0),
+                        "deaths": p.get("deaths", 0),
+                        "dead": p.get("dead", False),
                     }
                     for pid, p in players.items()
+                },
+                "bullets": {
+                    str(bid): {
+                        "x": b["x"], "y": b["y"],
+                        "owner": b["owner"],
+                        "dx": b["dx"], "dy": b["dy"],
+                    }
+                    for bid, b in bullets.items()
                 },
             }
 
@@ -268,6 +350,16 @@ def handle_connect(addr, data):
             "color": PLAYER_COLORS[pid % len(PLAYER_COLORS)],
             "input": {},
             "last_input_seq": 0,
+            "health": 150,
+            "ammo": MAX_AMMO,
+            "last_shot_time": 0.0,
+            "reloading_since": None,
+            "kills": 0,
+            "assists": 0,
+            "deaths": 0,
+            "dead": False,
+            "dead_since": None,
+            "damage_dealt": {},  # attacker_pid -> total damage this life
         }
         players[pid] = player
         addr_to_pid[addr] = pid
@@ -323,6 +415,8 @@ def handle_input(addr, data):
         pid = addr_to_pid.get(addr)
         if pid is None:
             return
+        if players[pid].get("dead", False):
+            return
         inp_seq = data.get("seq", 0)
         if inp_seq > players[pid].get("last_input_seq", -1):
             players[pid]["input"] = data
@@ -339,6 +433,78 @@ def handle_disconnect(addr, data):
         pid = addr_to_pid.get(addr)
     if pid is not None:
         disconnect_player(pid, addr)
+
+def handle_shoot(addr, data):
+    global next_bullet_id
+    with lock:
+        pid = addr_to_pid.get(addr)
+        if pid is None:
+            return
+        p = players[pid]
+        now = time.time()
+
+        # Enforce cooldown and ammo
+        if p["dead"] or p["ammo"] <= 0 or p["reloading_since"] is not None:
+            return
+        if now - p["last_shot_time"] < SHOOT_COOLDOWN:
+            return
+
+        dx = float(data.get("dx", 0))
+        dy = float(data.get("dy", 0))
+        length = math.sqrt(dx*dx + dy*dy)
+        if length < 1e-6:
+            return
+        dx /= length
+        dy /= length
+
+        bid = next_bullet_id
+        next_bullet_id += 1
+        bullets[bid] = {
+            "x": p["x"], "y": p["y"],
+            "dx": dx, "dy": dy,
+            "owner": pid,
+        }
+
+        p["ammo"] -= 1
+        p["last_shot_time"] = now
+        if p["ammo"] == 0:
+            p["reloading_since"] = now
+
+        print(f"[SHOOT] pid={pid} dir=({dx:.2f},{dy:.2f}) ammo={p['ammo']}")
+
+
+def handle_respawn(addr, data):
+    with lock:
+        pid = addr_to_pid.get(addr)
+        if pid is None:
+            return
+        p = players[pid]
+        if not p["dead"]:
+            return
+        if p["dead_since"] is None or time.time() - p["dead_since"] < RESPAWN_DELAY:
+            return
+        spawn = SPAWN_POSITIONS[pid % len(SPAWN_POSITIONS)]
+        p["dead"] = False
+        p["dead_since"] = None
+        p["health"] = 150
+        p["ammo"] = MAX_AMMO
+        p["reloading_since"] = None
+        p["x"] = float(spawn[0])
+        p["y"] = float(spawn[1])
+        p["input"] = {}
+        print(f"[RESPAWN] pid={pid} '{p['name']}'")
+
+
+def handle_server_query(addr, data):
+    with lock:
+        count = len(players)
+    send(addr, {
+        "type": PKT_SERVER_INFO,
+        "player_count": count,
+        "max_players": MAX_PLAYERS,
+        "server_name": SERVER_NAME,
+    })
+
 
 def handle_chat(addr, data):
     with lock:
@@ -370,6 +536,9 @@ HANDLERS = {
     PKT_ACK: handle_ack,
     PKT_DISCONNECT: handle_disconnect,
     PKT_CHAT: handle_chat,
+    PKT_SHOOT: handle_shoot,
+    PKT_SERVER_QUERY: handle_server_query,
+    PKT_RESPAWN: handle_respawn,
 }
 
 
@@ -415,6 +584,10 @@ def recv_loop():
                 print(f"[PKT] ACK       from {name:<12} seq={seq}")
             elif ptype == PKT_CHAT:
                 print(f"[PKT] CHAT       from {name:<12} msg='{data.get('message','')[:30]}'")
+            elif ptype == PKT_SHOOT:
+                print(f"[PKT] SHOOT      from {name:<12}")
+            elif ptype == PKT_RESPAWN:
+                print(f"[PKT] RESPAWN    from {name:<12}")
             else:
                 print(f"[PKT] {ptype:<12} from {addr[0]}:{addr[1]}")
             # END LOG

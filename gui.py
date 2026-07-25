@@ -2,10 +2,12 @@
 gui.py — In-game HUD for UDP Multiplayer Game
 
 Components:
-    TextInput   — keyboard-driven text buffer
-    ChatLog     — scrolling message history
-    Button      — clickable button with states
-    HUD         — composes all components, owns layout
+    TextInput       — keyboard-driven text buffer
+    ChatLog         — scrolling message history
+    Button          — clickable button with states
+    ScoreBoard      — Tab-key overlay showing K/A/D for all players
+    DeathOverlay    — shown on death; respawn button enabled after 5s
+    HUD             — composes all components, owns layout
 
 Usage in client.py:
     hud = HUD(screen_w, screen_h, on_connect=..., on_disconnect=...)
@@ -16,6 +18,7 @@ Usage in client.py:
 """
 
 import pygame
+import time
 from typing import Callable
 
 # Palette
@@ -272,6 +275,232 @@ class Button:
         surface.blit(label_surf, (lx, ly))
 
 
+# Disconnect Popup
+class DisconnectOverlay:
+    """Full-screen modal shown on disconnect. Blocks all game input."""
+
+    def __init__(self, on_reconnect: Callable):
+        self.visible      = False
+        self._btn = Button("Reconnect", accent=_C["accent"], on_click=on_reconnect)
+
+    def show(self): self.visible = True
+    def hide(self): self.visible = False
+
+    def handle_event(self, event: pygame.event.Event):
+        if not self.visible:
+            return
+        self._btn.handle_event(event)
+
+    def draw(self, surface: pygame.Surface):
+        if not self.visible:
+            return
+        sw, sh = surface.get_size()
+
+        # Dark overlay
+        overlay = pygame.Surface((sw, sh), pygame.SRCALPHA)
+        overlay.fill((10, 12, 18, 200))
+        surface.blit(overlay, (0, 0))
+
+        # Panel
+        pw, ph = 320, 140
+        px, py = (sw - pw) // 2, (sh - ph) // 2
+        panel = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        panel.fill(_C["panel"])
+        surface.blit(panel, (px, py))
+        pygame.draw.rect(surface, _C["danger"], (px, py, pw, ph), 1, border_radius=6)
+
+        # Title
+        title = _FONT_UI.render("You are disconnected", True, _C["text"])
+        surface.blit(title, (px + (pw - title.get_width()) // 2, py + 28))
+
+        # Subtitle
+        sub = _FONT_SMALL.render("Press Reconnect to rejoin the server", True, _C["dim"])
+        surface.blit(sub, (px + (pw - sub.get_width()) // 2, py + 54))
+
+        # Reconnect button — centered
+        self._btn.rect.w = 120
+        self._btn.set_pos(px + (pw - 120) // 2, py + 90)
+        self._btn.draw(surface)
+
+
+# ScoreBoard
+
+class ScoreBoard:
+    """
+    Tab-key overlay. Shows Name / Kills / Assists / Deaths for all players,
+    sorted by kills descending. Caller passes a snapshot list each draw call.
+    """
+
+    _COL_W  = (200, 70, 70, 70)   # Name, K, A, D column widths
+    _ROW_H  = 28
+    _PAD    = 20
+    _HDR_H  = 36
+
+    def __init__(self):
+        self.visible = False
+
+    def show(self): self.visible = True
+    def hide(self): self.visible = False
+    def toggle(self): self.visible = not self.visible
+
+    def draw(self, surface: pygame.Surface, players_snap: dict, my_pid):
+        if not self.visible:
+            return
+        sw, sh = surface.get_size()
+
+        total_w = sum(self._COL_W) + self._PAD * 2
+        rows = sorted(players_snap.items(), key=lambda kv: kv[1].get("kills", 0), reverse=True)
+        total_h = self._HDR_H + len(rows) * self._ROW_H + self._PAD * 2
+
+        px = (sw - total_w) // 2
+        py = (sh - total_h) // 2
+
+        # Background panel
+        panel = pygame.Surface((total_w, total_h), pygame.SRCALPHA)
+        panel.fill((10, 12, 20, 220))
+        surface.blit(panel, (px, py))
+        pygame.draw.rect(surface, _C["panel_line"], (px, py, total_w, total_h), 1, border_radius=6)
+
+        # Title
+        title_surf = _FONT_UI.render("SCOREBOARD", True, _C["accent"])
+        surface.blit(title_surf, (px + (total_w - title_surf.get_width()) // 2, py + 8))
+
+        # Column headers
+        headers = ["Name", "Kills", "Assists", "Deaths"]
+        cx = px + self._PAD
+        hy = py + self._HDR_H - 14
+        for i, hdr in enumerate(headers):
+            s = _FONT_UI.render(hdr, True, _C["dim"])
+            if i == 0:
+                surface.blit(s, (cx, hy))
+            else:
+                surface.blit(s, (cx + self._COL_W[i] // 2 - s.get_width() // 2, hy))
+            cx += self._COL_W[i]
+
+        # Separator
+        sep_y = py + self._HDR_H
+        pygame.draw.line(surface, _C["panel_line"], (px + self._PAD, sep_y), (px + total_w - self._PAD, sep_y))
+
+        # Rows
+        for row_idx, (pid, p) in enumerate(rows):
+            ry = sep_y + row_idx * self._ROW_H
+            is_local = (pid == my_pid)
+
+            # Highlight local player
+            if is_local:
+                hl = pygame.Surface((total_w - 2, self._ROW_H), pygame.SRCALPHA)
+                hl.fill((0, 255, 170, 18))
+                surface.blit(hl, (px + 1, ry))
+
+            # Dead indicator tint
+            if p.get("dead", False):
+                tint = pygame.Surface((total_w - 2, self._ROW_H), pygame.SRCALPHA)
+                tint.fill((255, 60, 60, 15))
+                surface.blit(tint, (px + 1, ry))
+
+            cx = px + self._PAD
+            name_text = p.get("name", "?") + (" ★" if is_local else "")
+            if p.get("dead", False):
+                name_text += " [dead]"
+            name_color = _C["accent"] if is_local else _C["text"]
+            ns = _FONT_UI.render(name_text, True, name_color)
+            surface.blit(ns, (cx, ry + (self._ROW_H - ns.get_height()) // 2))
+            cx += self._COL_W[0]
+
+            for val, col_w in zip(
+                [p.get("kills", 0), p.get("assists", 0), p.get("deaths", 0)],
+                self._COL_W[1:],
+            ):
+                vs = _FONT_UI.render(str(val), True, _C["text"])
+                surface.blit(vs, (cx + col_w // 2 - vs.get_width() // 2,
+                                  ry + (self._ROW_H - vs.get_height()) // 2))
+                cx += col_w
+
+        # Footer hint
+        hint = _FONT_SMALL.render("Release TAB to close", True, _C["dim"])
+        surface.blit(hint, (px + (total_w - hint.get_width()) // 2, py + total_h - 14))
+
+
+# DeathOverlay
+
+RESPAWN_DELAY = 5.0  # seconds — must match server.py RESPAWN_DELAY
+
+class DeathOverlay:
+    """
+    Full-screen modal shown when the local player is dead.
+    Respawn button is disabled for RESPAWN_DELAY seconds, then enables.
+    on_respawn() is called when the player clicks Respawn.
+    """
+
+    def __init__(self, on_respawn: Callable):
+        self.visible    = False
+        self._died_at   = 0.0
+        self._btn = Button("Respawn", accent=_C["accent"], on_click=self._try_respawn)
+        self._on_respawn = on_respawn
+
+    def show(self):
+        self.visible  = True
+        self._died_at = time.time()
+        self._btn.disabled = True
+
+    def hide(self):
+        self.visible = False
+        self._btn.disabled = False
+
+    def _try_respawn(self):
+        if not self._btn.disabled:
+            self._on_respawn()
+
+    def tick(self, dt: float):
+        if not self.visible:
+            return
+        elapsed = time.time() - self._died_at
+        self._btn.disabled = elapsed < RESPAWN_DELAY
+
+    def countdown(self) -> float:
+        """Remaining seconds before respawn is allowed (0 when ready)."""
+        return max(0.0, RESPAWN_DELAY - (time.time() - self._died_at))
+
+    def handle_event(self, event: pygame.event.Event):
+        if not self.visible:
+            return
+        self._btn.handle_event(event)
+
+    def draw(self, surface: pygame.Surface):
+        if not self.visible:
+            return
+        sw, sh = surface.get_size()
+
+        overlay = pygame.Surface((sw, sh), pygame.SRCALPHA)
+        overlay.fill((10, 5, 5, 200))
+        surface.blit(overlay, (0, 0))
+
+        pw, ph = 340, 160
+        px, py = (sw - pw) // 2, (sh - ph) // 2
+        panel = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        panel.fill(_C["panel"])
+        surface.blit(panel, (px, py))
+        pygame.draw.rect(surface, _C["danger"], (px, py, pw, ph), 1, border_radius=6)
+
+        title = _FONT_UI.render("YOU DIED", True, _C["danger"])
+        surface.blit(title, (px + (pw - title.get_width()) // 2, py + 20))
+
+        cd = self.countdown()
+        if cd > 0:
+            sub_text = f"Respawning in {cd:.1f}s…"
+            sub_color = _C["dim"]
+        else:
+            sub_text = "Ready to respawn!"
+            sub_color = _C["accent"]
+
+        sub = _FONT_SMALL.render(sub_text, True, sub_color)
+        surface.blit(sub, (px + (pw - sub.get_width()) // 2, py + 50))
+
+        self._btn.rect.w = 120
+        self._btn.set_pos(px + (pw - 120) // 2, py + 100)
+        self._btn.draw(surface)
+
+
 # HUD
 
 class HUD:
@@ -279,13 +508,16 @@ class HUD:
     Top-level HUD. Owns layout, routes events, exposes a clean API to client.py.
 
     Public API:
-        hud.draw(screen)
+        hud.draw(screen, players_snap, my_pid)
         hud.handle_event(event)
         hud.tick(dt)
         hud.add_chat(name, message)
         hud.add_system(message)
         hud.set_state("disconnected" | "connecting" | "connected")
-        hud.consume_chat() -> str | None   # returns message to send, if any
+        hud.consume_chat() -> str | None
+        hud.notify_death()            # call when local player dies
+        hud.notify_respawn()          # call when local player respawns
+        hud.consume_respawn() -> bool # True once when respawn was clicked
     """
 
     CHAT_H      = 120    # height of bottom chat panel
@@ -294,7 +526,8 @@ class HUD:
 
     def __init__(self, screen_w: int, screen_h: int,
                  on_connect: Callable    = None,
-                 on_disconnect: Callable = None):
+                 on_disconnect: Callable = None,
+                 on_respawn: Callable    = None):
 
         _load_fonts()
 
@@ -302,24 +535,39 @@ class HUD:
         self.screen_h   = screen_h
         self._state     = "disconnected"
         self._chat_open = False
-        self._pending   = None   # message waiting to be sent
+        self._pending   = None   # chat message waiting to be sent
+        self._respawn_pending = False
 
         self._chat_log   = ChatLog()
         self._text_input = TextInput()
 
+        def _on_disconnect_clicked():
+            self._overlay.show()
+            if on_disconnect:
+                on_disconnect()
+
+        def _on_respawn_clicked():
+            self._respawn_pending = True
+            if on_respawn:
+                on_respawn()
+
         self._btn_connect = Button(
             "Connect",
-            accent   = _C["accent"],
-            on_click = on_connect,
+            accent=_C["accent"],
+            on_click=on_connect,
         )
         self._btn_disconnect = Button(
             "Disconnect",
-            accent   = _C["danger"],
-            on_click = on_disconnect,
+            accent=_C["danger"],
+            on_click=_on_disconnect_clicked,
         )
-
+        self._overlay = DisconnectOverlay(on_connect)
+        self._overlay.hide()
+        self._scoreboard = ScoreBoard()
+        self._death_overlay = DeathOverlay(_on_respawn_clicked)
         self._layout()
-        self.set_state("disconnected")
+        self.set_state("disconnected", initial=True)
+
 
     # Layout
 
@@ -361,20 +609,22 @@ class HUD:
 
     # State
 
-    def set_state(self, state: str):
-        """'disconnected' | 'connecting' | 'connected'"""
+    def set_state(self, state: str, initial: bool = False):
         self._state = state
         if state == "disconnected":
-            self._btn_connect.disabled    = False
+            self._btn_connect.disabled = False
             self._btn_disconnect.disabled = True
+            if not initial:
+                self._overlay.show()
         elif state == "connecting":
-            self._btn_connect.disabled    = True
+            self._btn_connect.disabled = True
             self._btn_disconnect.disabled = True
+            self._overlay.hide()
         elif state == "connected":
-            self._btn_connect.disabled    = True
+            self._btn_connect.disabled = True
             self._btn_disconnect.disabled = False
-
-    # ── Public API ────────────────────────────────────────────────────────────
+            self._overlay.hide()
+            # ── Public API ────────────────────────────────────────────────────────────
 
     def add_chat(self, name: str, message: str):
         self._chat_log.add(name, message)
@@ -383,10 +633,24 @@ class HUD:
         self._chat_log.add("", message, is_system=True)
 
     def consume_chat(self) -> "str | None":
-        """Call once per frame. Returns a pending message string or None."""
+        """Call once per frame. Returns a pending chat message or None."""
         msg = self._pending
         self._pending = None
         return msg
+
+    def consume_respawn(self) -> bool:
+        """Call once per frame. Returns True once when respawn was clicked."""
+        v = self._respawn_pending
+        self._respawn_pending = False
+        return v
+
+    def notify_death(self):
+        """Call when the local player dies."""
+        self._death_overlay.show()
+
+    def notify_respawn(self):
+        """Call when the server confirms the player is alive again."""
+        self._death_overlay.hide()
 
     def is_chat_open(self) -> bool:
         return self._chat_open
@@ -396,11 +660,29 @@ class HUD:
     def tick(self, dt: float):
         self._chat_log.tick(dt)
         self._text_input.tick(dt)
+        self._death_overlay.tick(dt)
 
     def handle_event(self, event: pygame.event.Event):
-        # Always route mouse events to buttons
+        # Death overlay takes priority
+        self._death_overlay.handle_event(event)
+        if self._death_overlay.visible:
+            return
+
+        # Disconnect overlay
+        self._overlay.handle_event(event)
+        if self._overlay.visible:
+            return
+
         self._btn_connect.handle_event(event)
         self._btn_disconnect.handle_event(event)
+
+        # Scoreboard toggle (TAB hold)
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_TAB:
+            self._scoreboard.show()
+            return
+        if event.type == pygame.KEYUP and event.key == pygame.K_TAB:
+            self._scoreboard.hide()
+            return
 
         # Chat open/close
         if event.type == pygame.KEYDOWN:
@@ -433,9 +715,13 @@ class HUD:
 
     # Draw
 
-    def draw(self, screen: pygame.Surface):
+    def draw(self, screen: pygame.Surface, players_snap: dict = None, my_pid=None):
         self._draw_chat_panel(screen)
         self._draw_top_bar(screen)
+        self._overlay.draw(screen)
+        self._death_overlay.draw(screen)
+        if players_snap is not None:
+            self._scoreboard.draw(screen, players_snap, my_pid)
 
     def _draw_chat_panel(self, screen: pygame.Surface):
         # Only draw the panel bg when chat is open or recent messages exist
@@ -493,3 +779,9 @@ class HUD:
 
         self._btn_connect.draw(screen)
         self._btn_disconnect.draw(screen)
+
+    def is_suppressed(self) -> bool:
+        """True when game input should be blocked."""
+        return self._chat_open or self._overlay.visible or self._death_overlay.visible
+
+
